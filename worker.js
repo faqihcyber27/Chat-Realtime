@@ -3,118 +3,122 @@ export class ChatRoom {
     this.state = state;
     this.clients = [];
     this.users = new Map();
+    this.subscribers = [];
   }
 
-  async fetch(request) {
+  async fetch(request, env) {
+
+    const url = new URL(request.url);
+
+    // 🔔 SUBSCRIBE PUSH
+    if (request.method === "POST" && url.pathname === "/subscribe") {
+      const sub = await request.json();
+      this.subscribers.push(sub);
+      return new Response("ok");
+    }
+
+    // 💬 WEBSOCKET
     if (request.headers.get("Upgrade") === "websocket") {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
 
-      await this.handleSession(server);
+      await this.handleSession(server, env);
 
       return new Response(null, {
         status: 101,
-        webSocket: client,
+        webSocket: client
       });
     }
 
-    return new Response("Chat Worker Running");
+    return new Response("OK");
   }
 
-  async handleSession(ws) {
+  async handleSession(ws, env) {
     ws.accept();
     this.clients.push(ws);
 
-    // 🔥 kirim history ke user baru
     const history = (await this.state.storage.get("messages")) || [];
     history.forEach(m => ws.send(JSON.stringify(m)));
 
     ws.onmessage = async (e) => {
-      let data;
+      let data = JSON.parse(e.data);
 
-      try {
-        data = JSON.parse(e.data);
-      } catch {
-        return;
-      }
+      if (data.type === "ping") return;
 
-      // ✅ FIX: KEEP ALIVE (PING)
-      if (data.type === "ping") {
-        return;
-      }
-
-      // ✅ JOIN USER
       if (data.type === "join") {
         this.users.set(ws, data.user);
-
         this.broadcast({
-          type: "system",
-          msg: `${data.user} joined`,
-          users: this.users.size
+          type:"system",
+          msg:`${data.user} joined`,
+          users:this.users.size
         });
-
         return;
       }
 
-      // ✅ TYPING
       if (data.type === "typing") {
         this.broadcast(data, ws);
         return;
       }
 
-      // ✅ MESSAGE & IMAGE
       if (data.type === "message" || data.type === "image") {
 
         const msgData = {
-          type: data.type,
-          user: data.user,
-          msg: data.msg || null,
-          img: data.img || null,
-          time: new Date().toLocaleTimeString().slice(0,5),
-          clientId: data.clientId
+          ...data,
+          time: new Date().toLocaleTimeString().slice(0,5)
         };
 
-        // 🔥 simpan ke storage (history)
         const history = (await this.state.storage.get("messages")) || [];
         history.push(msgData);
-
-        // limit biar tidak berat
         if (history.length > 100) history.shift();
-
         await this.state.storage.put("messages", history);
 
         this.broadcast(msgData);
+
+        // 🔔 PUSH NOTIF
+        await this.sendPush(msgData);
       }
     };
 
     ws.onclose = () => {
       const user = this.users.get(ws);
-
       this.users.delete(ws);
       this.clients = this.clients.filter(c => c !== ws);
 
-      if (user) {
-        this.broadcast({
-          type: "system",
-          msg: `${user} left`,
-          users: this.users.size
-        });
-      }
+      this.broadcast({
+        type:"system",
+        msg:`${user} left`,
+        users:this.users.size
+      });
     };
   }
 
-  broadcast(data, sender = null) {
-    this.clients.forEach(client => {
-      if (client !== sender) {
-        try {
-          client.send(JSON.stringify(data));
-        } catch {}
+  broadcast(data, sender=null) {
+    this.clients.forEach(c => {
+      if (c !== sender) {
+        try { c.send(JSON.stringify(data)); } catch {}
       }
     });
   }
+
+  async sendPush(msg) {
+    for (let sub of this.subscribers) {
+      try {
+        await fetch(sub.endpoint, {
+          method:"POST",
+          headers:{
+            "TTL":"60",
+            "Content-Type":"application/json"
+          },
+          body: JSON.stringify({
+            title: msg.user,
+            body: msg.msg || "📷 Image"
+          })
+        });
+      } catch {}
+    }
+  }
 }
 
-// 🔥 ENTRY POINT
 export default {
   fetch(request, env) {
     const id = env.CHAT_ROOM.idFromName("global");
