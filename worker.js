@@ -30,5 +30,3 @@ export default {
     return env.CHAT_ROOM.get(id).fetch(request);
   }
 };
-
-export { ChatRoom };
