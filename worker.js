@@ -18,12 +18,16 @@ export class ChatRoom {
       });
     }
 
-    return new Response("OK");
+    return new Response("Chat Worker Running");
   }
 
   async handleSession(ws) {
     ws.accept();
     this.clients.push(ws);
+
+    // 🔥 kirim history ke user baru
+    const history = (await this.state.storage.get("messages")) || [];
+    history.forEach(m => ws.send(JSON.stringify(m)));
 
     ws.onmessage = async (e) => {
       let data;
@@ -34,7 +38,12 @@ export class ChatRoom {
         return;
       }
 
-      // JOIN
+      // ✅ FIX: KEEP ALIVE (PING)
+      if (data.type === "ping") {
+        return;
+      }
+
+      // ✅ JOIN USER
       if (data.type === "join") {
         this.users.set(ws, data.user);
 
@@ -47,56 +56,65 @@ export class ChatRoom {
         return;
       }
 
-      // TYPING
+      // ✅ TYPING
       if (data.type === "typing") {
         this.broadcast(data, ws);
         return;
       }
 
-      // MESSAGE
-      const msgData = {
-        type: "message",
-        user: data.user,
-        msg: data.msg,
-        time: new Date().toLocaleTimeString().slice(0,5),
-        clientId: data.clientId
-      };
+      // ✅ MESSAGE & IMAGE
+      if (data.type === "message" || data.type === "image") {
 
-      // simpan ke storage
-      const history = (await this.state.storage.get("messages")) || [];
-      history.push(msgData);
-      await this.state.storage.put("messages", history);
+        const msgData = {
+          type: data.type,
+          user: data.user,
+          msg: data.msg || null,
+          img: data.img || null,
+          time: new Date().toLocaleTimeString().slice(0,5),
+          clientId: data.clientId
+        };
 
-      this.broadcast(msgData);
+        // 🔥 simpan ke storage (history)
+        const history = (await this.state.storage.get("messages")) || [];
+        history.push(msgData);
+
+        // limit biar tidak berat
+        if (history.length > 100) history.shift();
+
+        await this.state.storage.put("messages", history);
+
+        this.broadcast(msgData);
+      }
     };
 
     ws.onclose = () => {
       const user = this.users.get(ws);
+
       this.users.delete(ws);
-
-      this.broadcast({
-        type: "system",
-        msg: `${user} left`,
-        users: this.users.size
-      });
-
       this.clients = this.clients.filter(c => c !== ws);
-    };
 
-    // kirim history saat connect
-    const history = (await this.state.storage.get("messages")) || [];
-    history.forEach(m => ws.send(JSON.stringify(m)));
+      if (user) {
+        this.broadcast({
+          type: "system",
+          msg: `${user} left`,
+          users: this.users.size
+        });
+      }
+    };
   }
 
   broadcast(data, sender = null) {
-    this.clients.forEach(c => {
-      if (c !== sender) {
-        c.send(JSON.stringify(data));
+    this.clients.forEach(client => {
+      if (client !== sender) {
+        try {
+          client.send(JSON.stringify(data));
+        } catch {}
       }
     });
   }
 }
 
+// 🔥 ENTRY POINT
 export default {
   fetch(request, env) {
     const id = env.CHAT_ROOM.idFromName("global");
