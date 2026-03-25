@@ -1,30 +1,42 @@
 export class ChatRoom {
   constructor(state, env) {
     this.state = state;
-    this.clients = new Map(); // ws -> user
+    this.clients = new Set();
+    this.userMap = new Map(); // ws -> username
   }
 
-  async fetch(request, env) {
-    if (request.headers.get("Upgrade") === "websocket") {
-      const pair = new WebSocketPair();
-      const [client, server] = Object.values(pair);
-
-      await this.handle(server);
-
-      return new Response(null, { status: 101, webSocket: client });
+  async fetch(request) {
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("Expected websocket", { status: 400 });
     }
-    return new Response("OK");
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    this.handleSession(server);
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
   }
 
-  async handle(ws) {
+  handleSession(ws) {
     ws.accept();
+    this.clients.add(ws);
 
-    ws.onmessage = async (e) => {
-      const data = JSON.parse(e.data);
+    ws.addEventListener("message", (event) => {
+      let data;
+
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
 
       // JOIN
       if (data.type === "join") {
-        this.clients.set(ws, data.user);
+        this.userMap.set(ws, data.user || "User");
         return;
       }
 
@@ -35,46 +47,47 @@ export class ChatRoom {
       }
 
       // MESSAGE / AUDIO
-      if (["message","audio"].includes(data.type)) {
+      if (data.type === "message" || data.type === "audio") {
 
         const msg = {
           ...data,
-          status:"sent",
-          time:new Date().toLocaleTimeString().slice(0,5)
+          time: new Date().toLocaleTimeString().slice(0,5),
+          status: "sent"
         };
 
         // broadcast ke semua
         this.broadcast(msg);
 
-        // ACK ke sender (delivered)
+        // ACK ke sender
         ws.send(JSON.stringify({
-          type:"ack",
-          id:data.id,
-          status:"delivered"
+          type: "ack",
+          id: data.id,
+          status: "delivered"
         }));
 
-        // simulate read (1 detik)
-        setTimeout(()=>{
+        // simulate read
+        setTimeout(() => {
           ws.send(JSON.stringify({
-            type:"ack",
-            id:data.id,
-            status:"read"
+            type: "ack",
+            id: data.id,
+            status: "read"
           }));
-        },1000);
+        }, 1000);
       }
-    };
+    });
 
-    ws.onclose = ()=>{
+    ws.addEventListener("close", () => {
       this.clients.delete(ws);
-    };
+      this.userMap.delete(ws);
+    });
   }
 
-  broadcast(data, sender=null){
-    for (let [client] of this.clients) {
+  broadcast(data, sender = null) {
+    for (const client of this.clients) {
       if (client !== sender) {
-        try{
+        try {
           client.send(JSON.stringify(data));
-        }catch{}
+        } catch {}
       }
     }
   }
